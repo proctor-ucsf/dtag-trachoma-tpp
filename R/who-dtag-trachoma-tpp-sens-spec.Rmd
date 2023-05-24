@@ -1,0 +1,329 @@
+---
+title: "WHO DTAG Trachoma Subgroup"
+subtitle: "Estimate ranges of sensitivity and specificity required for a diagnostic under assumptions of true prevalence, power, and Type I error"
+author: "Ben Arnold ben.arnold@ucsf.edu"
+date: "updated: `r Sys.time()`"
+output: 
+  html_document:
+    theme: default
+    highlight: pygments
+    code_folding: hide
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+---
+
+# Overview
+
+Our objective was to identify the range of diagnostic sensitivity and specificity for a Target Product Profile (TPP) for trachoma elimination monitoring. This TPP is being developed within the activities of the WHO DTAG trachoma subgroup. 
+
+The main use cases envisioned in the TPP are:
+1.	 to monitor populations following discontinuation of mass distribution of azithromycin (MDA), 
+2.	to identify or assess newly suspected endemic populations, and 
+3.	to investigate populations with unusual epidemiology, such as persistent trachoma despite years of ongoing MDA.
+
+We assessed diagnostic sensitivity and specificity assuming hypothetical prevalence thresholds for decision making of 5% and 10%, with the idea that a low prevalence threshold (5%) would be most relevant to use case 1, and a moderately low prevalence (10%) most relevant to use cases 2 and 3. 
+
+Assumptions made for specificity calculations
+1) A population-based sample of 20 clusters with 50 children per cluster (1,000 total)
+2) Power (1- Type II error) was set to 90% to correctly conclude prevalence <5% if true prevalence is ≤1% (post-elimination) and <10% if true prevalence is ≤5% (suspected endemic).
+
+Assumptions made for sensitivity calculations
+1) A population-based sample of 20 clusters with 50 children per cluster (1,000 total)
+2) Assume identified minimum specificity (above)
+4) Type 1 error (α) ≤5%. This means that using the diagnostic, the survey would incorrectly conclude prevalence in a defined population is below the 5% threshold (post-elimination) or below the 10% threshold (suspected endemic) <5% of the time.
+
+For a 5% prevalence guideline, the minimum specificity was 0.98 and minimum sensitivity was 0.6
+
+For a 10% prevalence guideline, the minimum specificity was 0.98 and minimum sensitivity was 0.85.
+
+# Preamble
+
+```{r preamble, message = FALSE}
+
+#----------------------------------
+# preamble
+#----------------------------------
+# clear memory
+rm(list=ls())
+
+# packages
+library(tidyverse)
+library(kableExtra)
+library(sandwich)
+library(lmtest)
+
+# parallel computing
+library(foreach)
+library(doParallel)
+registerDoParallel(cores = detectCores() - 1)
+
+# colorblind friendly palette
+cbp <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+```
+
+# Functions
+
+```{r functions}
+
+## standard sample size required 
+## to estimate prevalence with a given precision
+#' @param prev - prevalence
+#' @param conf - width of 1/2 confidence interval. i.e., p +/- conf 
+#' @param alpha - type I error (2-sided). alpha = 0.05 = 95% CI
+sampsi_prop <- function(prev, conf, alpha=0.05) {
+  Za <- -qnorm(alpha/2)
+  nest <- (Za/conf)^2*(prev)*(1-prev)
+  return(nest)
+}
+
+#----------------------------------
+# Diggle 2011
+#----------------------------------
+## correction of prevalence by sens and spec
+#' @param p - prevalence
+#' @param sens - sensitivity 
+#' @param spec - specificity 
+correct_p_misclass <- function(p,sens,spec){
+  pmin(pmax((p + (spec-1))/(sens+spec -1),0),1)
+}
+est_p_misclass <- function(p,sens,spec){
+  pmin(pmax((1-spec) + (sens+spec-1)*p,0),1)
+}
+
+#----------------------------------
+# simulate a survey of 1000
+# and return prevalence estimate
+# and its upper 95% CI limit
+#
+# very bespoke!  assumes existence
+# of clids vector, which is 1000 length
+# to identify clusters to adjust SEs
+#' @param p_true - true prevalence
+#' @param sens - sensitivity 
+#' @param spec - specificity 
+#' @param n - survey size (num children)
+#' @param clid - vector of length n with cluster IDs to correct SEs
+#' 
+#' @returns
+#' a data frame with 1 observation and 6 variables
+#' p_true, sens, spec, n are the parameter values supplied
+#' p is the estimate prevalence
+#' p_ub is the estimated upper limit of the 95% CI
+#----------------------------------
+simsvy <- function(p_true,sens,spec,n,clid) {
+   pi <- est_p_misclass(p = p_true, sens = sens, spec = spec)
+   pdraw <- rbinom(n=1000,size=1,prob=pi)
+   fiti <- lm(pdraw~1)
+   fitrb <- coeftest(fiti, vcov.=vcovCL(fiti, cluster=clid))
+   pest <- mean(pdraw)
+   pest_ub <- fitrb[1,1] + 1.96*fitrb[1,2]
+   return(data.frame(p_true = p_true, sens = sens, spec = spec, n = n, p=pest, p_ub=pest_ub))
+}
+
+      
+```
+
+
+# Find minimum specificity and sensitivity
+
+## 5% prevalence threshold
+
+Assume true prevalence is 1%. Identify specificity required to achieve ≥90% power.
+
+```{r identify specificity for 5pct}
+
+#----------------------------
+# identify the proportion of
+# surveys that will correctly
+# identify prevalence <5% if
+# true prevalence is 1% with
+# perfect sensitivity across
+# a range of specificities
+#----------------------------
+
+# simulate 1000 samples
+# within each sample, estimate
+# the 95% CI, assuming 50 children/ cluster x 20 clusters
+prevs <- c(0.01,0.02,0.03)
+specs <- seq(0.97,0.99,by=0.005)
+# icc = 0, but still account for clusters in the 95% CI
+clids <- rep(paste0("cluster",1:20),50)
+powsim_spec5 <- foreach(previ = prevs, .combine = rbind) %:%
+  foreach(speci = specs, .combine = rbind) %do% {
+    foreach(simi = 1:1000, .combine = rbind) %dopar% {
+      set.seed(simi)
+      return(simsvy(p_true = previ,sens = 1,spec = speci,n=1000, clid=clids))
+  } 
+  
+}
+```
+
+```{r identify specificity for 5pct table}
+
+#----------------------------
+# summarize power for each
+# specificity
+#----------------------------
+spec_sum5 <- powsim_spec5 %>%
+  group_by(p_true,spec) %>%
+  mutate(p05 = ifelse(p_ub < 0.05,1,0)) %>%
+  summarize(pow = mean(p05), .groups = "drop") %>%
+  pivot_wider(id_cols = spec, names_from = p_true, names_prefix = "prev",values_from = pow)
+
+kbl(spec_sum5,
+    caption = "Power (1-Type II error) to correctly conclude prevalence <5% assuming perfect sensitivity for true prevalence ranging 1% to 3%, specificity ranging 0.97 to 0.99.",
+    col.names = c("Specificity","p = 1%","p = 2%", "p = 3%")) %>%
+  kable_styling(bootstrap_options = "striped") %>%
+  column_spec(1,bold=TRUE) %>%
+  add_header_above(header = c(" "=1, "True Prevalence"=3))
+
+```
+
+For specificity with ≥90% power (0.98), identify sensitivity to keep Type I error <5% in the case of a true prevalence of 5%
+
+```{r identify sensitivity for 5pct}
+
+#----------------------------
+# identify the proportion of
+# surveys that will correctly
+# identify prevalence 5% if
+# true prevalence is 5% with
+# specificity set to 0.98
+#----------------------------
+
+# simulate 1000 samples
+# within each sample, estimate
+# the 95% CI, assuming 50 children/ cluster x 20 clusters
+p_true <- 0.05
+senss <- seq(0.5,0.9,by=0.1)
+# icc = 0, but still account for clusters in the 95% CI
+clids <- rep(paste0("cluster",1:20),50)
+powsim_sens5 <- foreach(sensi = senss, .combine = rbind) %:% 
+  foreach(simi = 1:1000, .combine = rbind) %dopar% {
+      set.seed(simi)
+      return(simsvy(p_true = 0.05,sens = sensi,spec = 0.98,n=1000, clid=clids))
+  } 
+
+```
+
+
+```{r identify sensitivity for 5pct table}
+#----------------------------
+# summarize Type I error for each
+# sensitivity
+#----------------------------
+sens_sum5 <- powsim_sens5 %>%
+  group_by(sens) %>%
+  mutate(p05 = ifelse(p_ub < 0.05,1,0)) %>%
+  summarize(typeI = mean(p05))
+
+kbl(sens_sum5,
+    caption = "Type I error to incorrectly conclude prevalence of <5% if true prevalence is 5%, for specificity of 0.98 and a range of values for sensitivity.",
+    col.names = c("Sensitivity","Type I error")) %>%
+  kable_styling(bootstrap_options = "striped")
+```
+
+
+## 10% prevalence threshold
+
+Assume true prevalence is 10%
+```{r identify specificity for 10pct powsim}
+
+#----------------------------
+# identify the proportion of
+# surveys that will correctly
+# identify prevalence <5% if
+# true prevalence is 1% with
+# perfect sensitivity across
+# a range of specificities
+#----------------------------
+
+# simulate 1000 samples
+# within each sample, estimate
+# the 95% CI, assuming 50 children/ cluster x 20 clusters
+prevs <- c(0.01,0.03,0.05,0.07)
+specs <- seq(0.9,0.99,by=0.01)
+# icc = 0, but still account for clusters in the 95% CI
+clids <- rep(paste0("cluster",1:20),50)
+powsim_spec10 <- foreach(previ = prevs, .combine = rbind) %:%
+  foreach(speci = specs, .combine = rbind) %do% {
+    foreach(simi = 1:1000, .combine = rbind) %dopar% {
+      set.seed(simi)
+      return(simsvy(p_true = previ,sens = 1,spec = speci,n=1000, clid=clids))
+  } 
+  
+}
+```
+
+```{r identify specificity for 10pct table}
+
+#----------------------------
+# summarize power for each
+# specificity
+#----------------------------
+spec_sum10 <- powsim_spec10 %>%
+  group_by(p_true,spec) %>%
+  mutate(p10 = ifelse(p_ub < 0.10,1,0)) %>%
+  summarize(pow = mean(p10), .groups = "drop") %>%
+  pivot_wider(id_cols = spec, names_from = p_true, names_prefix = "prev",values_from = pow)
+
+
+kbl(spec_sum10,
+    caption = "Power (1-Type II error) to correctly conclude prevalence <10% with perfect sensitivity for true prevalence ranging 1% to 7%, specificity ranging 0.90 to 0.99.",
+    col.names = c("Specificity","p = 1%","p = 3%", "p = 5%","p = 7%")) %>%
+  kable_styling(bootstrap_options = "striped") %>%
+  column_spec(1,bold=TRUE) %>%
+  add_header_above(header = c(" "=1, "True Prevalence"=4))
+```
+
+```{r identify sensitivity for 10pct powsim}
+
+#----------------------------
+# identify the proportion of
+# surveys that will correctly
+# identify prevalence 5% if
+# true prevalence is 5% with
+# specificity set to 0.98
+#----------------------------
+
+# simulate 1000 samples
+# within each sample, estimate
+# the 95% CI, assuming 50 children/ cluster x 20 clusters
+senss <- seq(0.7,0.95,by=0.05)
+# icc = 0, but still account for clusters in the 95% CI
+clids <- rep(paste0("cluster",1:20),50)
+set.seed(2323132)
+powsim_sens10 <- foreach(sensi = senss, .combine = rbind) %:% 
+  foreach(simi = 1:1000, .combine = rbind) %dopar% {
+      set.seed(simi)
+      return(simsvy(p_true = 0.1,sens = sensi,spec = 0.98,n=1000, clid=clids))
+  } 
+```
+
+```{r identify sensitivity for 10pct table}
+#----------------------------
+# summarize Type I error for each
+# sensitivitiy
+# falsely concluding prevalence is <10% when it is 10%
+#----------------------------
+sens_sum10 <- powsim_sens10 %>%
+  group_by(sens) %>%
+  mutate(p10 = ifelse(p_ub < 0.10,1,0)) %>%
+  summarize(typeI = mean(p10))
+
+kbl(sens_sum10,
+    caption = "Type I error to incorrectly conclude prevalence of <10% if true prevalence is 10%, for specificity of 0.98 and a range of values for sensitivity.",
+    col.names = c("Sensitivity","Type I error")) %>%
+  kable_styling(bootstrap_options = "striped")
+``` 
+
+# Session Info
+```{r session info}
+sessionInfo()
+```
+
+
